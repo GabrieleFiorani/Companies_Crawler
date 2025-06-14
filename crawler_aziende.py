@@ -2,9 +2,11 @@ import asyncio
 from playwright.async_api import async_playwright
 import pandas as pd
 
+
+from crawler_siti import *
+
+
 risultati = []
-
-
 
 NUM_PAGINE = int(input("Quante pagine vuoi visitare?: "))
 REGIONE = input("Digita la regione per la ricerca (es. Lombardia, Lazio, etc.): ")
@@ -35,8 +37,12 @@ async def main():
 
             for href in hrefs:
                 print(f"    → Apro {href}")
-                await page.goto(href)
-                await page.wait_for_load_state('networkidle')
+                try:
+                    await page.goto(href, timeout=10000)
+                    await page.wait_for_load_state('networkidle')
+                except Exception as e:
+                    print(f"  ⚠️  Errore durante apertura {href}: {e}")
+                    continue
 
                 nome_elem = await page.query_selector('span.scheda-azienda__companyTitle_content')
                 nome = await nome_elem.inner_text() if nome_elem else "N/A"
@@ -44,14 +50,36 @@ async def main():
                 sito_elem = await page.query_selector('a.bttn.bttn--white[title^="sito web"]')
                 sito = await sito_elem.get_attribute("href") if sito_elem else "N/A"
 
+                if sito and "facebook.com" in sito.lower():
+                    sito = "N/A"
 
-                risultati.append({
-                    "nome": nome,
-                    "sito": sito,
-                })
+                azienda = {"nome": nome}
+                if sito != "N/A":
+                    print(f"→ Analizzo sito: {sito}")
+                    valutazione = 0
+                    try:
+                        await page.goto(sito)
+                        await page.wait_for_load_state('load')
+                        azienda["sito"] = sito
+
+                        responsive = await valuta_responsivita(page)
+                        if responsive:
+                            valutazione += 35
+
+                        azienda["valutazione"] =  valutazione
+
+                    except Exception as e:
+                        print(f"Errore durante l'apertura del sito {sito}: {e}")
+                        azienda["sito"] = sito
+                else:
+                    azienda["sito"] = "N/A"
+                    azienda["valutazione"] = 0
+
+                risultati.append(azienda)
 
         await browser.close()
 
+# Avvia lo script
 asyncio.run(main())
 
 # Scrittura su Excel con intestazioni formattate
