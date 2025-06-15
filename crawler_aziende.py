@@ -45,7 +45,11 @@ async def main():
                     continue
 
                 nome_elem = await page.query_selector('span.scheda-azienda__companyTitle_content')
-                nome = await nome_elem.inner_text() if nome_elem else "N/A"
+                if nome_elem:
+                    nome = await nome_elem.inner_text()
+                else:
+                    nome_elem = await page.query_selector('h1.scheda-azienda__companyTitle')
+                    nome = await nome_elem.inner_text() if nome_elem else "N/A"
 
                 sito_elem = await page.query_selector('a.bttn.bttn--white[title^="sito web"]')
                 sito = await sito_elem.get_attribute("href") if sito_elem else "N/A"
@@ -54,6 +58,8 @@ async def main():
                     sito = "N/A"
 
                 azienda = {"nome": nome}
+
+
                 if sito != "N/A":
                     print(f"→ Analizzo sito: {sito}")
                     valutazione = 0

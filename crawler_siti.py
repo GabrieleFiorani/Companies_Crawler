@@ -62,3 +62,33 @@ async def valuta_responsivita(page):
 
     # True se almeno 3 su 5
     return punteggio >= 3
+
+
+async def has_header(page):
+    return await page.query_selector("header") is not None
+
+async def has_footer(page):
+    return await page.query_selector("footer") is not None
+
+
+async def has_map(page):
+    try:
+        # Cerca iframe con Google Maps nel src
+        iframe_maps = await page.query_selector('iframe[src*="google.com/maps"]')
+        if iframe_maps:
+            return True
+
+        # Cerca link o div che contengono Google Maps
+        map_element = await page.query_selector('a[href*="google.com/maps"], div[data-map]')
+        if map_element:
+            return True
+
+        # Cerca in tutto il contenuto della pagina il testo "maps"
+        inner_html = await page.content()
+        if "www.google.com/maps" in inner_html or "maps.app.goo.gl" in inner_html:
+            return True
+
+    except:
+        pass
+
+    return False
