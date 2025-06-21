@@ -1,293 +1,332 @@
-# controlli_sito.py
 import re
-import asyncio
+import requests
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, WebDriverException
+import time
 import json
-from playwright.async_api import async_playwright
 
+# --- Funzioni di controllo ---
 
-
-#controllo responsitività sito web
-async def valuta_responsivita(page):
-    """
-    Controllo avanzato responsive.
-    Restituisce True se almeno 3/5 controlli passano, altrimenti False.
-    """
-
-    punteggio = 0
-    totale = 5
-
-    # 1. Meta viewport presente
-    if await page.query_selector('meta[name="viewport"]') is not None:
-        punteggio += 1
-
-    # 2. Nessun elemento sborda orizzontalmente
-    no_overflow = await page.evaluate("""
-        !Array.from(document.querySelectorAll('*')).some(el => {
-            const rect = el.getBoundingClientRect();
-            return rect.right > window.innerWidth;
-        })
-    """)
-    if no_overflow:
-        punteggio += 1
-
-    # 3. Media queries nei CSS
-    has_media_query = await page.evaluate("""
-        Array.from(document.styleSheets).some(sheet => {
-            try {
-                return Array.from(sheet.cssRules || []).some(rule => rule.media && rule.media.mediaText);
-            } catch (e) {
-                return false;
-            }
-        });
-    """)
-    if has_media_query:
-        punteggio += 1
-
-    # 4. Simulazione viewport mobile/tablet/desktop
-    resolutions = [
-        {"width": 1920, "height": 1080},
-        {"width": 1024, "height": 768},
-        {"width": 375, "height": 667}
-    ]
-    passed = 0
-    for res in resolutions:
-        await page.set_viewport_size(res)
-        await page.wait_for_timeout(500)
-        no_scroll = await page.evaluate("document.body.scrollWidth <= window.innerWidth")
-        if no_scroll:
-            passed += 1
-    if passed >= 2:
-        punteggio += 1
-
-    # 5. Usa framework responsivi noti (bootstrap, tailwind)
-    uses_framework = await page.evaluate("""
-        document.documentElement.innerHTML.includes('bootstrap') ||
-        document.documentElement.innerHTML.includes('tailwind')
-    """)
-    if uses_framework:
-        punteggio += 1
-
-    return punteggio >= 3
-
-
-
-
-
-
-#controllo header
-async def has_header(page):
-    return await page.query_selector("header") is not None
-
-
-
-
-#controllo footer
-async def has_footer(page):
-    return await page.query_selector("footer") is not None
-
-
-
-
-#controllo logo
-async def has_logo(page):
-    selettori_logo = [
-        'img[class*="logo"]',
-        'img[id*="logo"]',
-        'img[src*="logo"]',
-        'header img',
-        'a[href="/"] img'
-    ]
-    for selector in selettori_logo:
-        elemento = await page.query_selector(selector)
-        if elemento:
+def contiene_banner_cookie(soup):
+    """Controlla se il sito mostra banner cookie"""
+    keywords = ['cookie', 'consent', 'gdpr', 'privacy']
+    for div in soup.find_all(['div', 'section', 'footer']):
+        id_class = (div.get('id') or '') + ' ' + ' '.join(div.get('class', []))
+        id_class = id_class.lower()
+        if any(keyword in id_class for keyword in keywords):
             return True
     return False
 
+def contiene_script_cookie(soup):
+    """Controlla se nel sito sono presenti script di gestione cookie"""
+    for script in soup.find_all('script'):
+        src = script.get('src', '').lower() if script.has_attr('src') else ''
+        if any(x in src for x in ['cookieconsent', 'tarteaucitron', 'cookie']):
+            return True
+    return False
 
+def SEO_check(soup):
+    """Valuta alcuni elementi SEO basilari, ritorna True se almeno 5 punti su 7"""
+    points = 0
 
+    # Titolo
+    title = soup.find('title')
+    if title and len(title.text) > 0:
+        points += 1
 
-#controllo informazioni di contatto
-async def has_contact_info(page):
-    contenuto = await page.content()
-    
-    # Controllo telefono (anche con prefisso +39)
-    has_phone = re.search(r'(\+39\s?\d{2,4}[\s.-]?\d{2,4}[\s.-]?\d{2,4}|\b\d{2,4}[\s.-]?\d{2,4}[\s.-]?\d{2,4}\b)', contenuto)
-    
-    # Controllo email
-    has_email = re.search(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', contenuto)
+    # Descrizione meta
+    description = soup.find('meta', attrs={'name': 'description'})
+    if description and 'content' in description.attrs and len(description['content']) > 0:
+        points += 1
 
-    # Ritorna True solo se entrambi sono presenti
-    return has_phone is not None and has_email is not None
+    # H1
+    h1_tags = soup.find_all('h1')
+    if len(h1_tags) > 0:
+        points += 1
 
+    # Canonical link
+    if soup.find('link', rel='canonical'):
+        points += 1
 
+    # Almeno un link
+    if soup.find('a', href=True):
+        points += 1
 
-# Controllo meta description
-async def check_meta_description(page):
+    # Presenza immagini
+    images = soup.find_all('img')
+    if len(images) > 0:
+        points += 1
+
+    # Almeno un'immagine con alt
+    for img in images:
+        if img.has_attr('alt') and len(img['alt']) > 0:
+            points += 1
+            break
+
+    return points >= 5
+
+def controllo_performance(url, max_tempo=3, max_dimensione_kb=500):
+    """Controlla se la pagina risponde entro max_tempo e pesa meno di max_dimensione_kb"""
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        meta = await page.query_selector('meta[name="description"]')
-        if not meta:
+        start = time.time()
+        response = requests.get(url, timeout=10, headers=headers)
+        durata = time.time() - start
+
+        if response.status_code != 200:
             return False
-        content = await meta.get_attribute('content')
-        if content and 50 <= len(content) <= 160:
-            return True
+
+        dimensione_kb = len(response.content) / 1024
+
+        return durata <= max_tempo and dimensione_kb <= max_dimensione_kb
+    except:
         return False
-    except Exception:
-        return False
-    
 
 
-
-# Controllo SEO
-async def controlla_seo(page):
-    punteggio = 0
-    totale = 4
-
-    # 1. Title valido (presente e lunghezza 10-70)
-    title = await page.title()
-    if title and 10 <= len(title) <= 70:
-        punteggio += 1
-
-    # 2. Meta description valida (presente e lunghezza 50-160)
-    if await check_meta_description(page):
-        punteggio += 1
-
-    # 3. Esattamente un tag H1
-    h1_tags = await page.query_selector_all("h1")
-    if len(h1_tags) == 1:
-        punteggio += 1
-
-    # 4. Almeno il 90% delle immagini con attributo alt
-    imgs = await page.query_selector_all("img")
-    if imgs:
-        imgs_senza_alt = 0
-        for img in imgs:
-            alt = await img.get_attribute("alt")
-            if not alt:
-                imgs_senza_alt += 1
-        if imgs_senza_alt / len(imgs) <= 0.1:
-            punteggio += 1
-    else:
-        # Se non ci sono immagini, consideriamo superato questo check
-        punteggio += 1
-
-    # Soglia minima: almeno 3 controlli superati
-    return punteggio >= 3
+def controllo_https_solo_protocollo(url):
+    return url.lower().startswith("https://")
 
 
+def presenza_contatti(soup):
+    """Controlla se nella pagina ci sono riferimenti ai contatti"""
+    testo = soup.get_text(separator=' ').lower()
+    parole_chiave = ['contatti', 'contact', 'telefono', 'email', 'indirizzo', 'tel', 'cellulare']
 
-# Controllo velocità di caricamento
-async def check_velocita_caricamento(page, url, soglia=3.0):
-    try:
-        await page.goto(url, timeout=15000)
-        durata = await page.evaluate("""
-            () => {
-                const timing = performance.timing;
-                return (timing.loadEventEnd - timing.navigationStart) / 1000;
-            }
-        """)
-        return durata <= soglia
-    except Exception as e:
-        print(f"Errore nel check velocità: {e}")
-        return False
-    
-
-
-# Controllo se il sito ha SSL
-def has_ssl(url):
-    return url.startswith("https://")
-
-
-
-# Controllo se il sito ha una mappa integrata
-async def has_map(page):
-    # 1. Cerca iframe di Google Maps o simili
-    iframe_maps = await page.query_selector_all('iframe[src*="google.com/maps"], iframe[src*="maps.google.com"], iframe[src*="openstreetmap.org"]')
-    if iframe_maps:
+    if any(parola in testo for parola in parole_chiave):
         return True
 
-    # 2. Cerca elementi con id o class contenenti "map"
-    map_elements = await page.query_selector_all('[id*="map"], [class*="map"]')
-    if map_elements:
+    mailto = soup.find('a', href=re.compile(r'^mailto:', re.I))
+    if mailto:
         return True
 
-    # 3. Cerca script che caricano le API di Google Maps
-    scripts = await page.query_selector_all('script[src*="maps.googleapis.com/maps/api"]')
-    if scripts:
+    tel = soup.find('a', href=re.compile(r'^tel:', re.I))
+    if tel:
+        return True
+
+    telefono_regex = re.compile(r'(\+?\d{1,3}[-.\s]?)?(\(?\d{2,4}\)?[-.\s]?){1,3}\d{3,4}')
+    if telefono_regex.search(testo):
         return True
 
     return False
 
+def presenza_partita_iva(soup):
+    """Controlla se la pagina contiene partita IVA"""
+    testo = soup.get_text(separator=' ').lower()
+    pattern = re.compile(r'partita iva[:\s]*([0-9]{11})', re.I)
+    if pattern.search(testo):
+        return True
+    pattern_num = re.compile(r'\b[0-9]{11}\b')
+    if pattern_num.search(testo):
+        return True
+    return False
 
-
-# Controllo se il sito ha link ai social
-async def has_social_links(page):
-    social_domains = ["facebook.com", "instagram.com", "linkedin.com", "twitter.com", "youtube.com"]
-    links = await page.query_selector_all("a[href]")
-    for link in links:
-        href = await link.get_attribute("href")
-        if href and any(domain in href for domain in social_domains):
+def check_viewport_meta(soup):
+    """Controlla se il meta viewport è presente e configurato correttamente"""
+    viewport = soup.find('meta', attrs={"name": "viewport"})
+    if viewport and viewport.has_attr('content'):
+        content = viewport['content'].lower()
+        if 'width=device-width' in content and 'initial-scale=1' in content:
             return True
     return False
 
+def has_media_queries(url, verbose=False, retries=3):
+    """
+    Controlla la presenza di media queries nella pagina.
+    Usa Selenium per eseguire il JS e caricare dinamicamente la pagina.
+    Effettua retry in caso di fallimenti o contenuti incompleti.
+    """
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--log-level=3")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"
+    )
+    service = Service(log_path='nul')  # Windows
 
+    for attempt in range(retries):
+        if verbose:
+            print(f"Attempt {attempt + 1} to check media queries on {url}")
+        try:
+            driver = webdriver.Chrome(service=service, options=options)
+            driver.get(url)
 
-# Controllo se il sito ha una privacy policy
-async def has_privacy_policy(page):
-    contenuto = await page.content()
-    return ("privacy policy" in contenuto.lower() or "cookie policy" in contenuto.lower())
-
-
-
-with open("aziende_con_sito.json", "r", encoding="utf-8") as f:
-    aziende_con_sito = json.load(f)
-
-async def analizza_siti(aziende_con_sito):
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
-
-        for azienda in aziende_con_sito:
-            sito = azienda["sito"]
-            print(f"Analizzo sito: {azienda['nome']} - {sito}")
-            valutazione = 0
+            # Attendi caricamento completo del DOM
+            WebDriverWait(driver, 20).until(
+                lambda d: d.execute_script("return document.readyState") == "complete"
+            )
+            # Attendi che almeno un file CSS sia caricato (presenza di link o style)
             try:
-                await page.goto(sito, timeout=10000, wait_until='domcontentloaded')
-                await page.wait_for_timeout(1000)  # breve attesa per sicurezza
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "link[rel='stylesheet'], style"))
+                )
+            except TimeoutException:
+                if verbose:
+                    print("Timeout attesa file CSS.")
+                # Continua comunque
+
+            # Attendi un po' per eventuali caricamenti JS dinamici aggiuntivi
+            time.sleep(3)
+
+            # Controlla la URL finale (dopo eventuali redirect)
+            final_url = driver.current_url
+            if verbose and final_url != url:
+                print(f"Redirect da {url} a {final_url}")
+
+            # Parsing HTML con BeautifulSoup
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            media_query_regex = re.compile(r'@media[^{]+{')
+
+            # Cerca media queries inline nei tag style
+            for style_tag in soup.find_all("style"):
+                if style_tag.string and media_query_regex.search(style_tag.string):
+                    if verbose:
+                        print("Media query trovata inline.")
+                    driver.quit()
+                    return True
+
+            # Cerca media queries nei CSS esterni
+            css_links = [link.get('href') for link in soup.find_all("link", rel="stylesheet") if link.get('href')]
+
+            for css_link in css_links:
+                full_url = css_link
+                if not css_link.startswith("http"):
+                    full_url = requests.compat.urljoin(final_url, css_link)
+                try:
+                    resp = requests.get(full_url, timeout=7)
+                    if resp.status_code == 200 and media_query_regex.search(resp.text):
+                        if verbose:
+                            print(f"Media query trovata in {full_url}")
+                        driver.quit()
+                        return True
+                except requests.RequestException:
+                    if verbose:
+                        print(f"Errore nel caricamento del CSS: {full_url}")
+                    continue
+
+            driver.quit()
+            if verbose:
+                print("Nessuna media query trovata.")
+            return False
+
+        except WebDriverException as e:
+            if verbose:
+                print(f"Errore WebDriver: {e}")
+            try:
+                driver.quit()
+            except:
+                pass
+            time.sleep(2)  # aspetta prima di retry
+
+    # Se arriviamo qui, tutti i tentativi sono falliti
+    if verbose:
+        print("Tutti i tentativi falliti per has_media_queries.")
+    return False
+
+# --- Funzione principale di controllo sito ---
+
+def site_checker(url, verbose=False):
+    """
+    Valuta un sito su vari parametri (cookie, SEO, performance, contatti, partita IVA, responsive).
+    Ritorna una percentuale di "qualità" su 100%.
+    """
+    max_points = 9
+    points = 0
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0 Safari/537.36"
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+
+        if response.status_code != 200:
+            if verbose:
+                print(f"Status code {response.status_code} per {url}")
+            return "0%"
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # HTTPS bonus
+        if url.startswith("https://"):
+            points += 0.5
+
+        # Footer esiste
+        footer = soup.find('footer')
+        if not footer:
+            footer = soup.find('div', {'id': lambda x: x and 'footer' in x.lower()})
+
+        if footer:
+            points += 0.5
+
+        # Banner cookie o script cookie
+        if contiene_banner_cookie(soup) or contiene_script_cookie(soup):
+            points += 0.5
+
+        # SEO
+        if SEO_check(soup):
+            points += 1
+
+        # Performance
+        if controllo_performance(url):
+            points += 1
+
+        # Contatti
+        if presenza_contatti(soup):
+            points += 1
+
+        # Partita IVA
+        if presenza_partita_iva(soup):
+            points += 0.5
+
+        # Meta viewport
+        if check_viewport_meta(soup):
+            points += 0.5
+
+        # Media queries / responsive
+        if has_media_queries(url, verbose=verbose):
+            points += 3
+        
+        # Controllo HTTPS
+        if controllo_https_solo_protocollo(url):
+            points += 0.5
+
+        percent = round(points / max_points * 100)
+        if verbose:
+            print(f"Punteggio totale: {points} / {max_points} => {percent}%")
+        return f"{percent}%"
+
+    except Exception as e:
+        if verbose:
+            print(f"Errore generale su {url}: {e}")
+        return "0%"
+
+# --- Esempio di utilizzo ---
+
+import json
+
+# Supponiamo che tu abbia il file "aziende.json" con il contenuto JSON che hai mostrato
+with open("aziende_con_sito.json", "r", encoding="utf-8") as f:
+    aziende = json.load(f)  # Questo carica l'array JSON come lista di dizionari Python
+
+# Ora "aziende" è una lista di dizionari Python, puoi passarla direttamente alle tue funzioni
+
+for azienda in aziende:
+    nome = azienda['nome']
+    sito = azienda['sito']
+    risultato = site_checker(sito)  # la tua funzione di controllo
+    azienda['percentuale'] = risultato
 
 
-                if await valuta_responsivita(page):
-                    valutazione += 20
-                if await has_header(page):
-                    valutazione += 5
-                if await has_footer(page):
-                    valutazione += 5
-                if await has_logo(page):
-                    valutazione += 5
-                if await has_contact_info(page):
-                    valutazione += 5
-                if await controlla_seo(page):
-                    valutazione += 25
-                if await check_velocita_caricamento(page, sito):
-                    valutazione += 10
-                if has_ssl(sito):
-                    valutazione += 10
-                if await has_map(page):
-                    valutazione += 5
-                if await has_social_links(page):
-                    valutazione += 5
-                if await has_privacy_policy(page):
-                    valutazione += 5
-
-                azienda["valutazione"] = f"{valutazione}%"
-            except Exception as e:
-                print(f"⚠️ Errore analizzando sito {sito}: {e}")
-                azienda["valutazione"] = "Errore"
-
-        await browser.close()
-
-        print("\nRisultati analisi:")
-        for azienda in aziende_con_sito:
-            print(azienda)
-
-
-asyncio.run(analizza_siti(aziende_con_sito))
+with open("aziende_con_percentuale.json", "w", encoding="utf-8") as f_out:
+    json.dump(aziende, f_out, ensure_ascii=False, indent=2)
+    
