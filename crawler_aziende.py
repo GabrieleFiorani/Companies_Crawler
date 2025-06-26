@@ -79,5 +79,5 @@ async def main():
 asyncio.run(main())
 # 🔽 Ora lanciamo il secondo script
 print("Parto con il secondo script...")
-subprocess.run(["python", "crawler_siti.py"])
+subprocess.run(["python", "scraping_no_site.py"])
 print("Secondo script terminato")

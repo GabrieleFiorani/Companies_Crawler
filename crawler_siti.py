@@ -314,19 +314,20 @@ def site_checker(url, verbose=False):
 
 import json
 
-# Supponiamo che tu abbia il file "aziende.json" con il contenuto JSON che hai mostrato
+# Carica il file esistente
 with open("aziende_con_sito.json", "r", encoding="utf-8") as f:
-    aziende = json.load(f)  # Questo carica l'array JSON come lista di dizionari Python
+    aziende = json.load(f)
 
-# Ora "aziende" è una lista di dizionari Python, puoi passarla direttamente alle tue funzioni
-
+# Applica la funzione site_checker a ciascuna azienda
 for azienda in aziende:
     nome = azienda['nome']
     sito = azienda['sito']
-    risultato = site_checker(sito)  # la tua funzione di controllo
+    try:
+        risultato = site_checker(sito)
+    except Exception as e:
+        risultato = "Errore: " + str(e)  # oppure risultato = 0
     azienda['percentuale'] = risultato
 
-
-with open("aziende_con_percentuale.json", "w", encoding="utf-8") as f_out:
+# Sovrascrivi lo stesso file con i dati aggiornati
+with open("aziende_con_sito.json", "w", encoding="utf-8") as f_out:
     json.dump(aziende, f_out, ensure_ascii=False, indent=2)
-    
